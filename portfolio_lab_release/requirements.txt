@@ -1,0 +1,14 @@
+streamlit>=1.35
+pandas>=2.0
+numpy>=1.24
+plotly>=5.20
+yfinance>=0.2.40
+requests>=2.31
+lxml>=5.0
+finance-datareader>=0.9.96
+reportlab>=4.0
+matplotlib>=3.7
+html5lib>=1.1
+
+feedparser>=6.0.11
+
