@@ -160,22 +160,52 @@ US_KOREAN_NAMES = {
     "SPY": "S&P500 에스앤피", "QQQ": "나스닥100",
 }
 
+# Frequently searched ETFs remain searchable even if an external listing provider fails.
+ETF_FALLBACK = [
+    ("SPDR S&P 500 ETF Trust (SPY)", "SPY", "미국 ETF", "에스앤피500 S&P500"),
+    ("Invesco QQQ Trust (QQQ)", "QQQ", "미국 ETF", "나스닥100"),
+    ("Vanguard S&P 500 ETF (VOO)", "VOO", "미국 ETF", "에스앤피500 S&P500"),
+    ("Vanguard Total Stock Market ETF (VTI)", "VTI", "미국 ETF", "미국전체시장"),
+    ("Schwab US Dividend Equity ETF (SCHD)", "SCHD", "미국 ETF", "미국배당"),
+    ("iShares Core S&P 500 ETF (IVV)", "IVV", "미국 ETF", "에스앤피500 S&P500"),
+    ("Invesco Nasdaq 100 ETF (QQQM)", "QQQM", "미국 ETF", "나스닥100"),
+    ("iShares 20+ Year Treasury Bond ETF (TLT)", "TLT", "미국 ETF", "미국장기국채"),
+    ("SPDR Gold Shares (GLD)", "GLD", "미국 ETF", "금 골드"),
+    ("KODEX 200", "069500.KS", "국내 ETF", "코덱스 코스피200"),
+    ("TIGER 200", "102110.KS", "국내 ETF", "타이거 코스피200"),
+    ("KODEX 코스닥150", "229200.KS", "국내 ETF", "코덱스 코스닥150"),
+    ("TIGER 미국S&P500", "360750.KS", "국내 ETF", "타이거 미국 에스앤피500"),
+    ("KODEX 미국S&P500", "379800.KS", "국내 ETF", "코덱스 미국 에스앤피500"),
+    ("TIGER 미국나스닥100", "133690.KS", "국내 ETF", "타이거 미국 나스닥100"),
+]
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_krx_etfs():
+    errors = []
+    for market in ("KRX-ETF", "ETF"):
+        try:
+            return load_krx(market)
+        except Exception as exc:
+            errors.append(f"{market}: {exc}")
+    raise RuntimeError(" / ".join(errors))
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_catalog():
     frames, errors = [], []
     for label, loader in [("KOSPI", lambda: load_krx("KOSPI")),
                           ("KOSDAQ", lambda: load_krx("KOSDAQ")),
-                          ("KRX ETF", lambda: load_krx("ETF")),
+                          ("KRX ETF", load_krx_etfs),
                           ("NASDAQ", load_nasdaq), ("S&P 500", load_sp500),
                           ("암호화폐", load_crypto)]:
         try:
             frames.append(loader())
         except Exception as exc:
             errors.append(f"{label}: {exc}")
-    if not frames:
-        return pd.DataFrame(columns=["종목명", "티커", "시장", "검색어"]), errors
-    catalog = pd.concat(frames, ignore_index=True).drop_duplicates("티커")
-    catalog["검색어"] = catalog["종목명"].astype(str) + " " + catalog["티커"].astype(str) + " " + catalog["티커"].map(US_KOREAN_NAMES).fillna("")
+    fallback = pd.DataFrame(ETF_FALLBACK, columns=["종목명", "티커", "시장", "별칭"])
+    catalog = pd.concat([fallback, *frames], ignore_index=True).drop_duplicates("티커", keep="first")
+    catalog["검색어"] = (catalog["종목명"].astype(str) + " " + catalog["티커"].astype(str)
+                          + " " + catalog["티커"].map(US_KOREAN_NAMES).fillna("")
+                          + " " + catalog.get("별칭", pd.Series(index=catalog.index, dtype=str)).fillna(""))
     return catalog, errors
 
 st.subheader("1. 통합 종목 검색 및 포트폴리오 구성")
@@ -193,6 +223,14 @@ if query.strip() and not catalog.empty:
     q = query.strip().casefold().replace(" ", "")
     mask = catalog["검색어"].str.casefold().str.replace(" ", "", regex=False).str.contains(q, regex=False, na=False)
     matches = catalog.loc[mask, ["종목명", "티커", "시장"]].head(60)
+    # Yahoo search supplements, but does not replace, the local searchable catalog.
+    # Search only for Latin-letter queries to avoid unreliable Korean transliteration.
+    if len(matches) < 15 and any("a" <= ch.lower() <= "z" for ch in query):
+        yahoo_rows = []
+        for label, ticker in search_yahoo(query.strip()):
+            yahoo_rows.append({"종목명": label, "티커": ticker, "시장": "Yahoo 검색"})
+        if yahoo_rows:
+            matches = pd.concat([matches, pd.DataFrame(yahoo_rows)], ignore_index=True).drop_duplicates("티커").head(60)
 elif not query.strip():
     st.caption("검색어를 입력하면 통합 결과가 나타납니다.")
 
