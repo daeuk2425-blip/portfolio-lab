@@ -10,6 +10,7 @@ from io import StringIO
 import FinanceDataReader as fdr
 from engine import simulate, analyze, FREQUENCIES
 from report import make_pdf
+from monthly_projection import monthly_wealth, allocation_amounts
 from narrative import write_analysis
 
 st.set_page_config(page_title="Portfolio Lab | 나만의 투자 점검", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
@@ -316,6 +317,11 @@ if not np.isclose(total_weight, 100):
     st.warning("분석하려면 비중 합계를 100%로 맞춰 주세요. 자동 조정 버튼을 이용할 수 있습니다.")
 st.caption("예금·CMA 금리는 가정값이며, 국내 주식은 KRW, 그 외에는 USD 표시 자산만 지원합니다.")
 
+st.subheader("초기 투자금액과 자산별 배분")
+initial_capital = st.number_input("총 초기 투자금액 (원)", min_value=10000, value=10000000, step=1000000, format="%d", key="initial_capital_v4")
+capital_allocation = allocation_amounts(allocation, initial_capital)
+st.dataframe(capital_allocation[["종목명", "종목 코드", "비중(%)", "초기 배분금액(KRW)"]].style.format({"비중(%)": "{:.2f}%", "초기 배분금액(KRW)": "{:,.0f}원"}), use_container_width=True, hide_index=True)
+st.caption("비중을 변경하면 자산별 초기 투자금액이 자동 계산됩니다. 과거 수익률에 투자금을 적용한 가상 시뮬레이션입니다.")
 st.caption("경제통계 API(ECOS·KOSIS)는 사용하지 않습니다. 결과는 과거 가격과 사용자 가정에 기반합니다.")
 
 if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primary", use_container_width=True):
@@ -368,6 +374,16 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
             all_stats[label] = analyze(r, benchmark, rf_rate / 100)
         stats = all_stats[strategy]
         port = all_returns[strategy]
+        monthly_result = monthly_wealth(port, initial_capital, {
+            "S&P500 (SPY, KRW)": benchmark,
+            "KOSPI200 (KODEX 200 ETF)": kospi200_benchmark,
+        })
+        st.subheader("월별 투자금액 및 성과 추정")
+        st.caption("월말 가격 기반 가상 성과입니다. 분석 기간을 1년으로 선택하면 최근 완료된 12개월을 확인할 수 있습니다.")
+        chart_cols = ["월말 평가금액", "S&P500 (SPY, KRW) 평가금액", "KOSPI200 (KODEX 200 ETF) 평가금액"]
+        st.plotly_chart(px.line(monthly_result[chart_cols], title="월별 누적 평가금액 비교 (원)", labels={"value":"평가금액 (원)", "index":"월", "variable":"비교 대상"}), use_container_width=True)
+        st.dataframe(monthly_result[["월간 수익률", "월간 손익", "월말 평가금액", "누적 수익률"]].style.format({"월간 수익률":"{:+.2%}","월간 손익":"{:+,.0f}원", "월말 평가금액":"{:,.0f}원", "누적 수익률":"{:+.2%}"}), use_container_width=True)
+        st.download_button("월별 투자성과 CSV 다운로드", monthly_result.to_csv(index_label="월").encode("utf-8-sig"), "portfolio_monthly_wealth.csv", "text/csv")
         st.success("분석이 완료되었습니다. 아래에서 포트폴리오의 성과·위험·리밸런싱 결과를 확인하세요.")
         st.subheader("핵심 성과 대시보드")
         percent_keys = {"누적 수익률", "CAGR", "벤치마크 CAGR", "벤치마크 대비 CAGR 차이", "연환산 변동성", "Jensen Alpha (연율 근사)", "Treynor (연율 근사)", "MDD", "VaR 95% (월간, 역사적)", "VaR 99% (월간, 역사적)"}
@@ -408,7 +424,7 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
                 st.write(analyst[key])
         assumptions = ["월말 종가 기준, 완료된 월만 사용, 분석 가능한 공통 기간으로 제한", "USD 표시 자산은 USD/KRW로 원화 환산", f"리밸런싱: {strategy}, 편도 거래비용: {transaction_bps:.0f} bps", f"예금: {deposit_rate:.2f}%, CMA: {cma_rate:.2f}%, 무위험수익률: {rf_rate:.2f}% (연 고정 가정)", "실제 거래·세금·매매 스프레드 미반영", "과거 생존 종목 중심 분석으로 생존편향 가능"]
         try:
-            pdf = make_pdf(allocation, strategy, stats, comparison, monthly, port, benchmark, corr, sources, assumptions, analyst=analyst, macro_view=macro_view, observations=observations, benchmark_kospi200=kospi200_benchmark, benchmark_stats=dual_stats)
+            pdf = make_pdf(allocation, strategy, stats, comparison, monthly, port, benchmark, corr, sources, assumptions, analyst=analyst, macro_view=macro_view, observations=observations, benchmark_kospi200=kospi200_benchmark, benchmark_stats=dual_stats, monthly_result=monthly_result, initial_capital=initial_capital, capital_allocation=capital_allocation)
             st.download_button("📄 종합 투자 분석 PDF 다운로드", data=pdf, file_name="portfolio_lab_report.pdf", mime="application/pdf", type="primary")
         except Exception as pdf_exc:
             st.error(f"PDF 생성 실패: {pdf_exc}")

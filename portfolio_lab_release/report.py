@@ -32,7 +32,7 @@ def get_font():
             except Exception: continue
     raise RuntimeError('한글 글꼴을 찾을 수 없습니다. packages.txt에 fonts-nanum을 추가하세요.')
 
-def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfolio, benchmark, corr, sources, assumptions, analyst=None, macro_view=None, observations=None, macro_chart=None, macro_label='', macro_transform='원자료', benchmark_kospi200=None, benchmark_stats=None):
+def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfolio, benchmark, corr, sources, assumptions, analyst=None, macro_view=None, observations=None, macro_chart=None, macro_label='', macro_transform='원자료', benchmark_kospi200=None, benchmark_stats=None, monthly_result=None, initial_capital=None, capital_allocation=None):
     font=get_font(); buf=io.BytesIO()
     doc=SimpleDocTemplate(buf,pagesize=(21*cm,29.7*cm),leftMargin=1.8*cm,rightMargin=1.8*cm,topMargin=2*cm,bottomMargin=1.8*cm)
     s=getSampleStyleSheet()
@@ -131,6 +131,26 @@ def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfol
     story.append(P('실제 투자손익, 보유 수량, 취득단가, 세금, 배당 재투자 실현 가능성, 슬리피지, 개별 종목의 공시 검토 및 미래 전망은 본 백테스트의 검증 범위 밖입니다. 분석 문장은 규칙 기반이며 독립적인 기업 리서치가 아닙니다.','PLSmall'))
     for title,url in (sources or [])[:10]:story.append(P(str(title)+' | '+str(url),'PLSmall'))
     story.append(P('본 보고서는 정보 제공용 과거 시뮬레이션이며 투자 권유가 아닙니다.','PLSmall'))
+    if monthly_result is not None and not monthly_result.empty:
+        story.append(PageBreak())
+        section('06  월별 투자성과 및 초기 투자금 배분')
+        story.append(P(f'초기 투자금액: {initial_capital:,.0f}원 | 분석 월수: {len(monthly_result)}개월', 'PLSmall'))
+        if capital_allocation is not None and not capital_allocation.empty:
+            rows=[['자산', '목표 비중', '초기 배분금액']]
+            for _, a in capital_allocation.iterrows():
+                rows.append([str(a['종목명']),f"{a['비중(%)']:.1f}%",f"{a['초기 배분금액(KRW)']:,.0f}원"])
+            story.append(table(rows,[6.8*cm,4*cm,6.4*cm]))
+        path=monthly_result[['월말 평가금액','S&P500 (SPY, KRW) 평가금액','KOSPI200 (KODEX 200 ETF) 평가금액']].copy()
+        story.append(Spacer(1,12))
+        story.append(chart(path,'월별 누적 평가금액 비교',ylabel='원',height=5.5))
+        rows=[['월','월간 수익률','월간 손익','월말 평가금액','누적 수익률']]
+        for date,r in monthly_result.iterrows():
+            rows.append([f'{date:%Y-%m}',f"{r['월간 수익률']:+.2%}",f"{r['월간 손익']:+,.0f}",f"{r['월말 평가금액']:,.0f}",f"{r['누적 수익률']:+.2%}"])
+        story.append(Spacer(1,10))
+        story.append(table(rows,[3*cm,3.3*cm,3.6*cm,4.2*cm,3.1*cm]))
+        best=monthly_result['월간 수익률'].idxmax();worst=monthly_result['월간 수익률'].idxmin()
+        story.append(P(f"최고 성과 월: {best:%Y-%m} ({monthly_result.loc[best,'월간 수익률']:+.2%}) | 최저 성과 월: {worst:%Y-%m} ({monthly_result.loc[worst,'월간 수익률']:+.2%})",'PLSmall'))
+        story.append(P('매월 말 가상 평가금액은 초기 투자금에 월별 시뮬레이션 수익률을 복리 적용했습니다. 실제 매수 수량, 매입 시점, 입출금 및 실현손익과 다릅니다. 종목별 초기 배분금액은 목표 비중 기준이며 실제 체결금액이 아닙니다.','PLSmall'))
     def footer(c,d):
         c.setStrokeColor(colors.HexColor('#C8D7E4'));c.line(1.8*cm,1.42*cm,19.2*cm,1.42*cm)
         c.setFont(font,8);c.setFillColor(GRAY);c.drawString(1.8*cm,1.06*cm,'PORTFOLIO LAB  |  Research & Risk Analytics');c.drawRightString(19.2*cm,1.06*cm,str(d.page))
