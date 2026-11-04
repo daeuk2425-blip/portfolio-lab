@@ -10,8 +10,6 @@ from io import StringIO
 import FinanceDataReader as fdr
 from engine import simulate, analyze, FREQUENCIES
 from report import make_pdf
-from macro import ecos_key_statistics, kosis_statistics, interpret_macro
-from research import ecos_series, kosis_series, transform, interpret_series, public_headlines
 from narrative import write_analysis
 
 st.set_page_config(page_title="Portfolio Lab | 나만의 투자 점검", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
@@ -25,7 +23,7 @@ div.stButton>button[kind="primary"],div.stDownloadButton>button[kind="primary"]{
 .hero h1{color:white;font-size:2.2rem;margin:0 0 9px}.hero p{color:#dcecf5;margin:0}
 </style>""",unsafe_allow_html=True)
 st.markdown('<div class="hero"><h1>PORTFOLIO LAB</h1><p>구성하고 · 비교하고 · 위험을 이해하고 · 나만의 리서치 PDF를 받으세요.</p></div>',unsafe_allow_html=True)
-st.caption("무료 분석 도구 | 원화 기준 백테스트 | 리밸런싱 전략 비교 | 검증 가능한 공식 통계 | 개인 투자 보고서")
+st.caption("무료 분석 도구 | 원화 기준 백테스트 | 리밸런싱 전략 비교 | 개인 투자 보고서")
 st.info("**이용 순서** ① 종목 추가 및 비중 100% 맞추기 → ② 왼쪽에서 분석 조건 선택 → ③ 아래 '포트폴리오 진단 시작' → ④ 대시보드 점검 및 PDF 다운로드")
 
 PRESETS = {
@@ -107,18 +105,19 @@ st.sidebar.caption("거래비용은 매매 회전율에 비례해 리밸런싱 �
 # Listings are fetched on demand, cached for 24 hours, and may occasionally be unavailable.
 # A searchable universe is not a guarantee of historical price availability.
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_kospi():
-    df = fdr.StockListing("KOSPI")
+def load_krx(market):
+    """Daily cached Korean listing, including listed ETFs."""
+    df = fdr.StockListing(market)
     if df is None or df.empty:
-        raise RuntimeError("KRX 종목 목록이 비어 있습니다")
+        raise RuntimeError(f"{market} 종목 목록이 비어 있습니다")
     code_col = next((c for c in ("Code", "Symbol", "Ticker") if c in df.columns), None)
     name_col = next((c for c in ("Name", "Company") if c in df.columns), None)
     if not code_col or not name_col:
-        raise RuntimeError("KRX 종목 목록의 열 구성이 변경되었습니다")
-    result = pd.DataFrame({"종목명": df[name_col].astype(str),
-                           "티커": df[code_col].astype(str).str.zfill(6) + ".KS",
-                           "시장": "KOSPI"})
-    return result.drop_duplicates("티커")
+        raise RuntimeError(f"{market} 종목 목록의 열 구성이 변경되었습니다")
+    suffix = ".KQ" if market == "KOSDAQ" else ".KS"
+    return pd.DataFrame({"종목명": df[name_col].astype(str),
+                         "티커": df[code_col].astype(str).str.zfill(6) + suffix,
+                         "시장": market}).drop_duplicates("티커")
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_nasdaq():
@@ -129,11 +128,9 @@ def load_nasdaq():
     df = df[df["Symbol"].notna() & (df["Symbol"] != "File Creation Time")]
     if "Test Issue" in df:
         df = df[df["Test Issue"] == "N"]
-    # Yahoo Finance generally uses '-' for NASDAQ symbols containing a dot.
-    result = pd.DataFrame({"종목명": df["Security Name"].astype(str),
-                           "티커": df["Symbol"].astype(str).str.replace(".", "-", regex=False),
-                           "시장": "NASDAQ"})
-    return result.drop_duplicates("티커")
+    return pd.DataFrame({"종목명": df["Security Name"].astype(str),
+                         "티커": df["Symbol"].astype(str).str.replace(".", "-", regex=False),
+                         "시장": "NASDAQ"}).drop_duplicates("티커")
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_sp500():
@@ -144,10 +141,9 @@ def load_sp500():
     df = next((t for t in tables if "Symbol" in t.columns and "Security" in t.columns), None)
     if df is None:
         raise RuntimeError("S&P 500 구성종목 표를 찾지 못했습니다")
-    result = pd.DataFrame({"종목명": df["Security"].astype(str),
-                           "티커": df["Symbol"].astype(str).str.replace(".", "-", regex=False),
-                           "시장": "S&P 500"})
-    return result.drop_duplicates("티커")
+    return pd.DataFrame({"종목명": df["Security"].astype(str),
+                         "티커": df["Symbol"].astype(str).str.replace(".", "-", regex=False),
+                         "시장": "S&P 500"}).drop_duplicates("티커")
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_crypto():
@@ -156,32 +152,49 @@ def load_crypto():
         {"종목명": "이더리움 (Ethereum)", "티커": "ETH-USD", "시장": "암호화폐"},
     ])
 
-st.subheader("1. 전체 시장 종목 검색 및 포트폴리오 구성")
-st.caption("코스피·나스닥 상장종목, S&P 500 지수 구성종목, 비트코인·이더리움을 검색할 수 있습니다. 상장종목 목록과 가격 데이터는 서로 다른 출처입니다.")
+US_KOREAN_NAMES = {
+    "AAPL": "애플", "NVDA": "엔비디아", "MSFT": "마이크로소프트",
+    "TSLA": "테슬라", "AMZN": "아마존", "GOOGL": "알파벳 구글",
+    "GOOG": "구글", "META": "메타 페이스북", "NFLX": "넷플릭스",
+    "AMD": "AMD 에이엠디", "PLTR": "팔란티어", "COIN": "코인베이스",
+    "SPY": "S&P500 에스앤피", "QQQ": "나스닥100",
+}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_catalog():
+    frames, errors = [], []
+    for label, loader in [("KOSPI", lambda: load_krx("KOSPI")),
+                          ("KOSDAQ", lambda: load_krx("KOSDAQ")),
+                          ("KRX ETF", lambda: load_krx("ETF")),
+                          ("NASDAQ", load_nasdaq), ("S&P 500", load_sp500),
+                          ("암호화폐", load_crypto)]:
+        try:
+            frames.append(loader())
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    if not frames:
+        return pd.DataFrame(columns=["종목명", "티커", "시장", "검색어"]), errors
+    catalog = pd.concat(frames, ignore_index=True).drop_duplicates("티커")
+    catalog["검색어"] = catalog["종목명"].astype(str) + " " + catalog["티커"].astype(str) + " " + catalog["티커"].map(US_KOREAN_NAMES).fillna("")
+    return catalog, errors
+
+st.subheader("1. 통합 종목 검색 및 포트폴리오 구성")
+st.caption("코스피·코스닥·국내 ETF·나스닥·S&P500·암호화폐를 한 번에 검색합니다. 종목 목록은 하루 동안 캐시됩니다.")
 if "portfolio_v7" not in st.session_state:
-    # Start clean so the table never disagrees with hidden editor state.
     st.session_state.portfolio_v7 = DEFAULT.to_dict("records")
-
-market_choice = st.radio("검색 대상", ["코스피", "나스닥", "S&P 500", "암호화폐 (BTC·ETH)", "기타 티커 직접 입력"], horizontal=True)
-query = st.text_input("종목명 또는 티커 검색", placeholder="예: LG에너지솔루션, Apple, NVDA")
-
-catalog = pd.DataFrame(columns=["종목명", "티커", "시장"])
-if market_choice != "기타 티커 직접 입력":
-    try:
-        with st.spinner("종목 목록을 불러오는 중..."):
-            catalog = {"코스피": load_kospi, "나스닥": load_nasdaq, "S&P 500": load_sp500, "암호화폐 (BTC·ETH)": load_crypto}[market_choice]()
-        st.caption(f"{market_choice} 검색 대상: {len(catalog):,}개")
-    except Exception as exc:
-        st.warning(f"종목 목록 조회 실패: {exc}. 직접 티커를 입력할 수 있습니다.")
-
+query = st.text_input("종목명·한글명·영문명·티커 통합 검색", placeholder="예: TIGER 반도체, 애플, Apple, NVDA, 069500")
+with st.spinner("통합 종목 목록을 불러오는 중..."):
+    catalog, listing_errors = load_catalog()
+if listing_errors:
+    st.caption("일부 목록을 불러오지 못했습니다: " + " | ".join(listing_errors)[:300])
+st.caption(f"검색 가능한 종목: {len(catalog):,}개 (중복 티커 제거)")
 matches = pd.DataFrame(columns=["종목명", "티커", "시장"])
-if not catalog.empty:
-    if query.strip():
-        mask = (catalog["종목명"].str.contains(query.strip(), case=False, regex=False, na=False)
-                | catalog["티커"].str.contains(query.strip(), case=False, regex=False, na=False))
-        matches = catalog.loc[mask].head(60)
-    else:
-        st.caption("종목명을 검색하면 결과가 나타납니다.")
+if query.strip() and not catalog.empty:
+    q = query.strip().casefold().replace(" ", "")
+    mask = catalog["검색어"].str.casefold().str.replace(" ", "", regex=False).str.contains(q, regex=False, na=False)
+    matches = catalog.loc[mask, ["종목명", "티커", "시장"]].head(60)
+elif not query.strip():
+    st.caption("검색어를 입력하면 통합 결과가 나타납니다.")
 
 options = []
 if not matches.empty:
@@ -258,24 +271,7 @@ if not np.isclose(total_weight, 100):
     st.warning("분석하려면 비중 합계를 100%로 맞춰 주세요. 자동 조정 버튼을 이용할 수 있습니다.")
 st.caption("예금·CMA 금리는 가정값이며, 국내 주식은 KRW, 그 외에는 USD 표시 자산만 지원합니다.")
 
-st.subheader("공식 통계 · 경제 뉴스 (선택 설정)")
-st.caption("인증키가 없어도 포트폴리오 백테스트와 PDF를 생성할 수 있습니다.")
-st.caption("AI 유료 API를 호출하지 않습니다. 통계 인증키는 공식 기관에서 무료 신청할 수 있으며 이용조건을 확인해야 합니다.")
-ecos_key = st.text_input("한국은행 ECOS 인증키 (선택)", type="password")
-kosis_key = st.text_input("KOSIS 인증키 (선택)", type="password")
-kosis_org = st.text_input("KOSIS 기관코드 (선택)", placeholder="공식 통계표에 표시된 orgId")
-kosis_table = st.text_input("KOSIS 통계표코드 (선택)", placeholder="공식 통계표에 표시된 tblId")
-st.caption("인증키를 ZIP이나 공개 코드에 저장하지 마세요. 공식 통계표의 정확한 항목코드를 사용해야 합니다.")
-st.markdown("#### 시계열 원자료 분석 설정")
-macro_provider = st.selectbox("시계열 출처", ["ECOS", "KOSIS"])
-macro_name = st.text_input("지표 표시명", value="선택한 경제지표", max_chars=60)
-ecos_table = st.text_input("ECOS 통계표코드", placeholder="ECOS 통계표 검색에서 확인")
-ecos_item = st.text_input("ECOS 항목코드", placeholder="해당 통계표의 ITEM_CODE1")
-kosis_item = st.text_input("KOSIS 항목코드", value="ALL")
-kosis_obj = st.text_input("KOSIS 분류코드", value="ALL")
-macro_transform = st.selectbox("데이터 가공", ["원자료", "전년동월비 (%)", "전월비 (%)", "3개월 이동평균"])
-news_query = st.text_input("경제신문 뉴스 검색어", value="한국 금리 환율 경기", max_chars=100)
-st.caption("뉴스는 RSS 제목과 공개 메타데이터만 수집합니다. 기사 전문이나 증권사 리서치 PDF를 읽었다고 주장하지 않습니다.")
+st.caption("경제통계 API(ECOS·KOSIS)는 사용하지 않습니다. 결과는 과거 가격과 사용자 가정에 기반합니다.")
 
 if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primary", use_container_width=True):
     try:
@@ -290,7 +286,7 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         end = dt.date.today() + dt.timedelta(days=1)
         start = dt.date.today() - dt.timedelta(days=round(years * 365.25) + 65)
         selected_tickers = [x for x in names if x not in ("DEPOSIT", "CMA")]
-        tickers = tuple(sorted(set(selected_tickers + ["SPY", "KRW=X"])))
+        tickers = tuple(sorted(set(selected_tickers + ["SPY", "069500.KS", "KRW=X"])))
         with st.spinner("가격과 환율 데이터를 다운로드하는 중..."):
             prices = get_prices(tickers, start.isoformat(), end.isoformat())
         missing = [x for x in tickers if x not in prices or prices[x].dropna().empty]
@@ -303,6 +299,7 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
             raise ValueError("공통 가격 이력이 부족합니다. 기간을 줄여 주세요.")
         usdkrw = prices["KRW=X"]
         benchmark = (prices["SPY"] * usdkrw).pct_change().dropna()
+        kospi200_benchmark = prices["069500.KS"].pct_change().dropna()  # KODEX 200 ETF proxy
         monthly = pd.DataFrame(index=benchmark.index)
         for ticker in names:
             if ticker in ("DEPOSIT", "CMA"):
@@ -313,6 +310,9 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
                 monthly[ticker] = price_krw.pct_change().reindex(benchmark.index)
         combined = monthly.join(benchmark.rename("benchmark"), how="inner").dropna()
         monthly, benchmark = combined[names], combined["benchmark"]
+        kospi200_benchmark = kospi200_benchmark.reindex(monthly.index)
+        valid = kospi200_benchmark.notna()
+        monthly, benchmark, kospi200_benchmark = monthly.loc[valid], benchmark.loc[valid], kospi200_benchmark.loc[valid]
         if len(monthly) < 6:
             raise ValueError("공통 수익률 이력이 6개월 미만입니다.")
         all_stats, all_returns, all_turnovers = {}, {}, {}
@@ -335,7 +335,8 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         st.subheader("리밸런싱 전략별 성과 비교")
         st.dataframe(comparison[["CAGR", "MDD", "Sharpe", "연환산 변동성"]].style.format({"CAGR":"{:.2%}","MDD":"{:.2%}","Sharpe":"{:.3f}","연환산 변동성":"{:.2%}"}), use_container_width=True)
         growth = pd.DataFrame({label:(1+r).cumprod() for label,r in all_returns.items()})
-        growth["SPY 벤치마크 (KRW)"] = (1+benchmark).cumprod()
+        growth["S&P500 (SPY, KRW)"] = (1+benchmark).cumprod()
+        growth["KOSPI200 (KODEX 200 ETF 대용)"] = (1+kospi200_benchmark).cumprod()
         st.plotly_chart(px.line(growth, title="리밸런싱 주기별 누적 성장 (초기 1 기준)"), use_container_width=True)
         dd = (1+port).cumprod()
         dd = dd / dd.cummax() - 1
@@ -349,62 +350,24 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         export["포트폴리오"] = port
         export["SPY 벤치마크"] = benchmark
         st.download_button("월별 수익률 CSV", export.to_csv(index_label="월").encode("utf-8-sig"), "portfolio_monthly_returns.csv", "text/csv")
-        with st.spinner("공식 통계 조회 및 포트폴리오 위험 해석 중..."):
-            ecos_obs, ecos_error = ecos_key_statistics(ecos_key)
-            kosis_obs, kosis_error = kosis_statistics(kosis_key, kosis_org, kosis_table)
-        observations = ecos_obs + kosis_obs
-        if ecos_error: st.info(ecos_error)
-        if kosis_error: st.info(kosis_error)
-        st.subheader("공식 통계 관측치")
-        if observations:
-            st.dataframe(pd.DataFrame(observations)[['source','name','value','unit','period']], use_container_width=True)
-        else:
-            st.warning("공식 통계 관측치를 확인하지 못했습니다. 현재 경제 상황에 대한 수치 주장은 작성하지 않습니다.")
-        macro_view = interpret_macro(allocation, stats, observations)
-        macro_series = pd.Series(dtype=float)
-        if macro_provider == "ECOS" and ecos_key and ecos_table and ecos_item:
-            macro_series, series_error = ecos_series(ecos_key, ecos_table, ecos_item)
-        elif macro_provider == "KOSIS" and kosis_key and kosis_org and kosis_table:
-            macro_series, series_error = kosis_series(kosis_key, kosis_org, kosis_table, kosis_item, kosis_obj)
-        else:
-            series_error = "시계열 데이터 설정이 불완전해 차트를 생략했습니다."
-        if series_error: st.info(series_error)
-        macro_chart = None
-        if not macro_series.empty:
-            macro_chart = transform(macro_series, macro_transform).dropna()
-            if len(macro_chart) >= 2:
-                st.subheader("원자료 가공 시계열")
-                st.line_chart(macro_chart.rename(macro_name))
-                st.download_button("가공된 경제통계 CSV", macro_chart.rename(macro_name).to_csv(index_label="date").encode("utf-8-sig"), "macro_timeseries.csv", "text/csv")
-                macro_view = interpret_series(macro_chart, macro_name, macro_transform, float(allocation.loc[~allocation['종목 코드'].str.endswith(('.KS','.KQ')) & ~allocation['종목 코드'].isin(['DEPOSIT','CMA']), '비중(%)'].sum())) + " " + macro_view
-            else:
-                macro_chart = None
-        try:
-            headlines = public_headlines(news_query) if news_query.strip() else []
-        except Exception as news_error:
-            headlines = []
-            st.info("뉴스 메타데이터 조회 실패: " + str(news_error)[:100])
-        if headlines:
-            st.subheader("관련 뉴스 제목 (기사 본문 미확인)")
-            for item in headlines: st.markdown(f"- [{item['title']}]({item['url']}) · {item['published']}")
-        st.subheader("포트폴리오 관점의 거시경제 해석 (규칙 기반)")
-        st.write(macro_view)
-        sources = [(f"{o['source']} | {o['name']} | {o['period']}",o['url']) for o in observations[:4]]
-        if macro_chart is not None:
-            sources.insert(0,(f"{macro_provider} | {macro_name} | {macro_chart.index[-1]:%Y-%m} | {macro_transform}","https://ecos.bok.or.kr/" if macro_provider=="ECOS" else "https://kosis.kr/"))
-        sources += [(f"뉴스 제목만 확인: {h['title']} ({h['published']})",h['url']) for h in headlines[:3]]
+        from engine import analyze_benchmarks
+        dual_stats = analyze_benchmarks(port, pd.DataFrame({"S&P500 (SPY, KRW)": benchmark, "KOSPI200 (KODEX 200 ETF)": kospi200_benchmark}), rf_rate / 100)
+        st.subheader("벤치마크별 위험조정성과")
+        st.dataframe(pd.DataFrame(dual_stats).T, use_container_width=True)
+        st.caption("KOSPI200은 KODEX 200 ETF(069500.KS), S&P500은 SPY ETF를 사용한 대용 비교입니다. 지수 자체의 총수익률과 다를 수 있습니다.")
+        observations, macro_view, sources = [], "경제통계 API는 사용하지 않습니다.", []
         analyst = write_analysis(allocation, stats, comparison, observations, macro_view, len(monthly))
         st.subheader("포트폴리오 핵심 진단")
-        st.write(analyst["thesis"])
-        st.write(analyst["risk_interpretation"])
-        st.write(analyst["conclusion"])
-        assumptions = ["월말 종가 기준, 완료된 월만 사용, 분석 가능한 공통 기간으로 제한", "USD 표시 자산은 USD/KRW로 원화 환산", f"리밸런싱: {strategy}, 편도 거래비용: {transaction_bps:.0f} bps (회전율 기준)", f"예금: {deposit_rate:.2f}%, CMA: {cma_rate:.2f}%, 무위험수익률: {rf_rate:.2f}% (연 고정 가정)", "실제 거래, 세금, 매매 스프레드, 배당 원천징수, 예금 중도해지 등 미반영", "선택 종목의 과거 현재 생존 종목 기준 분석으로 생존편향 가능"]
+        for key in ("thesis", "risk_interpretation", "conclusion"):
+            if analyst.get(key):
+                st.write(analyst[key])
+        assumptions = ["월말 종가 기준, 완료된 월만 사용, 분석 가능한 공통 기간으로 제한", "USD 표시 자산은 USD/KRW로 원화 환산", f"리밸런싱: {strategy}, 편도 거래비용: {transaction_bps:.0f} bps", f"예금: {deposit_rate:.2f}%, CMA: {cma_rate:.2f}%, 무위험수익률: {rf_rate:.2f}% (연 고정 가정)", "실제 거래·세금·매매 스프레드 미반영", "과거 생존 종목 중심 분석으로 생존편향 가능"]
         try:
-            pdf = make_pdf(allocation, strategy, stats, comparison, monthly, port, benchmark, corr, sources, assumptions, analyst=analyst, macro_view=macro_view, observations=observations, macro_chart=macro_chart, macro_label=macro_name, macro_transform=macro_transform)
-            st.download_button("📄 4페이지 개인 투자 분석 PDF 다운로드", data=pdf, file_name="portfolio_lab_report.pdf", mime="application/pdf", type="primary")
+            pdf = make_pdf(allocation, strategy, stats, comparison, monthly, port, benchmark, corr, sources, assumptions, analyst=analyst, macro_view=macro_view, observations=observations, benchmark_kospi200=kospi200_benchmark, benchmark_stats=dual_stats)
+            st.download_button("📄 종합 투자 분석 PDF 다운로드", data=pdf, file_name="portfolio_lab_report.pdf", mime="application/pdf", type="primary")
         except Exception as pdf_exc:
             st.error(f"PDF 생성 실패: {pdf_exc}")
-            st.info("Colab에서 !apt-get -qq install fonts-nanum 실행 후 다시 분석해 주세요.")
+            st.caption("report.py와 한글 글꼴 설치 상태를 확인해 주세요.")
         st.info("과거 시뮬레이션이며 투자 권유가 아닙니다. 분석 문단은 검증된 계산값과 조건부 규칙으로 생성되며, 생성형 AI가 직접 조사·집필한 의견은 아닙니다.")
     except Exception as exc:
         st.error(f"분석을 완료하지 못했습니다: {exc}")
