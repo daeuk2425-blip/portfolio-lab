@@ -32,7 +32,7 @@ def get_font():
             except Exception: continue
     raise RuntimeError('한글 글꼴을 찾을 수 없습니다. packages.txt에 fonts-nanum을 추가하세요.')
 
-def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfolio, benchmark, corr, sources, assumptions, analyst=None, macro_view=None, observations=None, macro_chart=None, macro_label='', macro_transform='원자료', benchmark_kospi200=None, benchmark_stats=None, monthly_result=None, initial_capital=None, capital_allocation=None):
+def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfolio, benchmark, corr, sources, assumptions, analyst=None, macro_view=None, observations=None, macro_chart=None, macro_label='', macro_transform='원자료', benchmark_kospi200=None, benchmark_stats=None, monthly_result=None, initial_capital=None, capital_allocation=None, investment_start=None, investment_end=None):
     font=get_font(); buf=io.BytesIO()
     doc=SimpleDocTemplate(buf,pagesize=(21*cm,29.7*cm),leftMargin=1.8*cm,rightMargin=1.8*cm,topMargin=2*cm,bottomMargin=1.8*cm)
     s=getSampleStyleSheet()
@@ -41,7 +41,20 @@ def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfol
     s.add(ParagraphStyle(name='PLBody',fontName=font,fontSize=9,leading=15,spaceAfter=8))
     s.add(ParagraphStyle(name='PLSmall',fontName=font,fontSize=7.5,leading=11,spaceAfter=5))
     s.add(ParagraphStyle(name='PLCell',fontName=font,fontSize=7.5,leading=11))
-    def P(x,style='PLBody'):return Paragraph(escape(str(x)),s[style])
+    def clean_text(value):
+        """Exclude stale ECOS/KOSIS observation-status notices from PDF prose."""
+        text = str(value)
+        # Only remove sentences about unavailable observations, not legitimate methodology.
+        sentences = re.split(r'(?<=[.!?。])\s+|(?<=다\.)\s*', text)
+        kept = []
+        for sentence in sentences:
+            mentions_source = bool(re.search(r'ECOS|KOSIS|경제통계\s*API', sentence, re.I))
+            unavailable = bool(re.search(r'확보하지 못|미확보|조회하지 못|수집하지 못|데이터가 없|관측치|사용하지 않|연결되지 않|불러오지 못', sentence))
+            if mentions_source and unavailable:
+                continue
+            kept.append(sentence)
+        return ' '.join(s.strip() for s in kept if s.strip()).strip()
+    def P(x,style='PLBody'):return Paragraph(escape(clean_text(x)),s[style])
     def section(title):story.append(P(title,'PLSection'))
     def fmt(x,pct=False):
         try:
@@ -64,7 +77,9 @@ def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfol
         return Image(out,width=17.2*cm,height=height*cm)
     story=[]
     story.append(P('PORTFOLIO LAB  |  투자 포트폴리오 리서치','PLTitle'))
-    story.append(P(f'분석기간 {monthly.index.min():%Y-%m} ~ {monthly.index.max():%Y-%m}  |  리밸런싱: {selected_label}  |  기준통화: KRW','PLSmall'))
+    if investment_start is not None and investment_end is not None:
+        story.append(P(f'투자 시작일 {investment_start:%Y-%m-%d}  |  투자 종료일 {investment_end:%Y-%m-%d}  |  기준통화: KRW', 'PLSmall'))
+    story.append(P(f'실제 분석 월 {monthly.index.min():%Y-%m} ~ {monthly.index.max():%Y-%m}  |  리밸런싱: {selected_label}  |  기준통화: KRW','PLSmall'))
     story.append(P('본 자료는 입력 비중을 기반으로 과거 가격을 재현한 가상 백테스트입니다. 실제 보유 수량·매입단가·평가손익을 추정하거나 표시하지 않습니다.'))
     section('01  포트폴리오 구성 및 핵심 성과')
     rows=[['편입 자산','티커','목표 비중']]
@@ -123,7 +138,7 @@ def make_pdf(allocation, selected_label, stats, strategy_table, monthly, portfol
         section('자산 및 업종 노출 해석');story.append(P(analyst['company_sector']))
     section('05  종합 평가 및 분석 가정')
     if analyst and analyst.get('conclusion'):story.append(P(analyst['conclusion']))
-    if analyst and analyst.get('macro_scenarios'):
+    if analyst and clean_text(analyst.get('macro_scenarios', '')):
         section('조건부 거시경제 시나리오');story.append(P(analyst['macro_scenarios']))
     section('자료 및 방법론')
     for item in assumptions or []:story.append(P('• '+str(item),'PLSmall'))
