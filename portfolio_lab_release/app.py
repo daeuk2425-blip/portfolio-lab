@@ -24,6 +24,13 @@ div.stButton>button[kind="primary"],div.stDownloadButton>button[kind="primary"]{
 </style>""",unsafe_allow_html=True)
 st.markdown('<div class="hero"><h1>PORTFOLIO LAB</h1><p>구성하고 · 비교하고 · 위험을 이해하고 · 나만의 리서치 PDF를 받으세요.</p></div>',unsafe_allow_html=True)
 st.caption("무료 분석 도구 | 원화 기준 백테스트 | 리밸런싱 전략 비교 | 개인 투자 보고서")
+st.sidebar.markdown('### 분석 모드')
+analysis_mode = st.sidebar.radio('분석 방식 선택', ['비중 기반 백테스트', '실제 보유자산 평가'], key='analysis_mode_v3')
+if analysis_mode == '실제 보유자산 평가':
+    from holdings_ui import render_holdings
+    render_holdings()
+    st.stop()
+
 st.info("**이용 순서** ① 종목 추가 및 비중 100% 맞추기 → ② 왼쪽에서 분석 조건 선택 → ③ 아래 '포트폴리오 진단 시작' → ④ 대시보드 점검 및 PDF 다운로드")
 
 PRESETS = {
