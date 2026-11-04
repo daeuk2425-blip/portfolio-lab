@@ -1,3 +1,4 @@
+import re
 """Portfolio Lab research-style, dynamically paginated PDF report.
 Compatible with app_v2.py's make_pdf call. Backtest only, not holdings P&L.
 """
