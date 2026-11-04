@@ -10,7 +10,7 @@ from io import StringIO
 import FinanceDataReader as fdr
 from engine import simulate, analyze, FREQUENCIES
 from report import make_pdf
-from monthly_projection import monthly_wealth, allocation_amounts
+from monthly_projection import monthly_wealth, allocation_amounts, monthly_prices_for_dates
 from narrative import write_analysis
 
 st.set_page_config(page_title="Portfolio Lab | 나만의 투자 점검", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
@@ -83,7 +83,7 @@ def get_prices(tickers, start, end):
     close = raw["Close"]
     if isinstance(close, pd.Series):
         close = close.to_frame(name=tickers[0])
-    return close.sort_index().resample("ME").last()
+    return close.sort_index()
 
 def metrics(r, market, rf):
     years = len(r) / 12
@@ -101,7 +101,12 @@ def metrics(r, market, rf):
     return total, cagr, vol, sharpe, mdd, beta, alpha_annual
 
 st.sidebar.header("분석 설정")
-years = st.sidebar.selectbox("분석 기간", [1, 3, 5, 10], index=3)
+st.sidebar.subheader("투자 기간 직접 설정")
+today = dt.date.today()
+default_start = today - dt.timedelta(days=365)
+start_date = st.sidebar.date_input("투자 시작일", value=default_start, max_value=today, key="investment_start_v5")
+end_date = st.sidebar.date_input("투자 종료일", value=today, max_value=today, key="investment_end_v5")
+st.sidebar.caption("시작일과 종료일을 모두 직접 선택합니다. 월별 성과는 첫 거래 가능일부터 마지막 거래 가능일까지 계산됩니다.")
 deposit_rate = st.sidebar.number_input("정기예금 가정 연 금리 (%)", min_value=0., max_value=30., value=3., step=0.1)
 cma_rate = st.sidebar.number_input("RP형 CMA 가정 연 금리 (%)", min_value=0., max_value=30., value=3., step=0.1)
 rf_rate = st.sidebar.number_input("무위험수익률 가정 연 금리 (%)", min_value=0., max_value=30., value=3., step=0.1)
@@ -334,8 +339,12 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         weights = pd.Series(allocation["비중(%)"].to_numpy(dtype=float) / 100, index=names)
         if not np.isclose(weights.sum(), 1., atol=1e-6):
             raise ValueError("비중 합계가 100%가 되어야 합니다.")
-        end = dt.date.today() + dt.timedelta(days=1)
-        start = dt.date.today() - dt.timedelta(days=round(years * 365.25) + 65)
+        if start_date >= end_date:
+            raise ValueError("투자 종료일은 시작일보다 늦어야 합니다.")
+        if end_date > dt.date.today():
+            raise ValueError("미래 종료일은 과거 백테스트에 사용할 수 없습니다.")
+        start = start_date
+        end = end_date + dt.timedelta(days=1)  # yfinance end is exclusive
         selected_tickers = [x for x in names if x not in ("DEPOSIT", "CMA")]
         tickers = tuple(sorted(set(selected_tickers + ["SPY", "069500.KS", "KRW=X"])))
         with st.spinner("가격과 환율 데이터를 다운로드하는 중..."):
@@ -343,11 +352,10 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         missing = [x for x in tickers if x not in prices or prices[x].dropna().empty]
         if missing:
             raise ValueError("가격 데이터가 없는 종목: " + ", ".join(missing))
-        prices = prices[list(tickers)].ffill().dropna()
-        prices = prices[prices.index.to_period("M") < pd.Timestamp.today().to_period("M")]
-        prices = prices.tail(years * 12 + 1)
-        if len(prices) < 7:
-            raise ValueError("공통 가격 이력이 부족합니다. 기간을 줄여 주세요.")
+        prices, actual_start, actual_end = monthly_prices_for_dates(
+            prices[list(tickers)], start_date, end_date
+        )
+        st.caption(f"선택 기간: {start_date:%Y-%m-%d} ~ {end_date:%Y-%m-%d} | 실제 공통 가격 기준: {actual_start:%Y-%m-%d} ~ {actual_end:%Y-%m-%d}")
         usdkrw = prices["KRW=X"]
         benchmark = (prices["SPY"] * usdkrw).pct_change().dropna()
         kospi200_benchmark = prices["069500.KS"].pct_change().dropna()  # KODEX 200 ETF proxy
@@ -355,7 +363,9 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         for ticker in names:
             if ticker in ("DEPOSIT", "CMA"):
                 rate = deposit_rate / 100 if ticker == "DEPOSIT" else cma_rate / 100
-                monthly[ticker] = (1 + rate) ** (1 / 12) - 1
+                # Fixed assumed annual rate accrued over each actual observation interval.
+                elapsed_days = pd.Series(prices.index, index=prices.index).diff().dt.days
+                monthly[ticker] = (1 + rate) ** (elapsed_days / 365.25) - 1
             else:
                 price_krw = prices[ticker] if is_krw_ticker(ticker) else prices[ticker] * usdkrw
                 monthly[ticker] = price_krw.pct_change().reindex(benchmark.index)
@@ -364,8 +374,8 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         kospi200_benchmark = kospi200_benchmark.reindex(monthly.index)
         valid = kospi200_benchmark.notna()
         monthly, benchmark, kospi200_benchmark = monthly.loc[valid], benchmark.loc[valid], kospi200_benchmark.loc[valid]
-        if len(monthly) < 6:
-            raise ValueError("공통 수익률 이력이 6개월 미만입니다.")
+        if len(monthly) < 2:
+            raise ValueError("공통 수익률 이력이 2개 관측 구간 미만입니다. 분석 기간을 늘려 주세요.")
         all_stats, all_returns, all_turnovers = {}, {}, {}
         for label, interval in FREQUENCIES.items():
             r, turnover = simulate(monthly, weights, interval, transaction_bps)
@@ -379,7 +389,7 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
             "KOSPI200 (KODEX 200 ETF)": kospi200_benchmark,
         })
         st.subheader("월별 투자금액 및 성과 추정")
-        st.caption("월말 가격 기반 가상 성과입니다. 분석 기간을 1년으로 선택하면 최근 완료된 12개월을 확인할 수 있습니다.")
+        st.caption(f"사용자 지정 기간 {start_date:%Y-%m-%d} ~ {end_date:%Y-%m-%d}의 월별 가상 성과입니다. 시작·종료 월은 일부 기간만 포함될 수 있습니다.")
         chart_cols = ["월말 평가금액", "S&P500 (SPY, KRW) 평가금액", "KOSPI200 (KODEX 200 ETF) 평가금액"]
         st.plotly_chart(px.line(monthly_result[chart_cols], title="월별 누적 평가금액 비교 (원)", labels={"value":"평가금액 (원)", "index":"월", "variable":"비교 대상"}), use_container_width=True)
         st.dataframe(monthly_result[["월간 수익률", "월간 손익", "월말 평가금액", "누적 수익률"]].style.format({"월간 수익률":"{:+.2%}","월간 손익":"{:+,.0f}원", "월말 평가금액":"{:,.0f}원", "누적 수익률":"{:+.2%}"}), use_container_width=True)
@@ -405,8 +415,8 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         corr = monthly.corr()
         st.subheader("자산별 상관관계")
         st.plotly_chart(px.imshow(corr, text_auto=".2f", zmin=-1, zmax=1, color_continuous_scale="RdBu_r"), use_container_width=True)
-        st.caption(f"공통 분석기간: {monthly.index.min():%Y-%m} ~ {monthly.index.max():%Y-%m} ({len(monthly)}개월). 99% VaR는 짧은 표본에서 불안정할 수 있습니다.")
-        st.caption("월말 데이터 · KRW 환산 · SPY 벤치마크 · 과거 가격 · 예금/CMA 고정 가정금리 · 세금 미반영")
+        st.caption(f"공통 분석기간: {actual_start:%Y-%m-%d} ~ {actual_end:%Y-%m-%d} ({len(monthly)}개 월별 관측 구간). 짧은 표본의 위험지표는 불안정할 수 있습니다.")
+        st.caption("월말 및 종료일 이전 마지막 거래가격 · KRW 환산 · SPY 벤치마크 · 과거 가격 · 예금/CMA 고정 가정금리 · 세금 미반영")
         export = monthly.copy()
         export["포트폴리오"] = port
         export["SPY 벤치마크"] = benchmark
@@ -422,7 +432,7 @@ if st.button("📊 포트폴리오 진단 시작 · PDF 만들기", type="primar
         for key in ("thesis", "risk_interpretation", "conclusion"):
             if analyst.get(key):
                 st.write(analyst[key])
-        assumptions = ["월말 종가 기준, 완료된 월만 사용, 분석 가능한 공통 기간으로 제한", "USD 표시 자산은 USD/KRW로 원화 환산", f"리밸런싱: {strategy}, 편도 거래비용: {transaction_bps:.0f} bps", f"예금: {deposit_rate:.2f}%, CMA: {cma_rate:.2f}%, 무위험수익률: {rf_rate:.2f}% (연 고정 가정)", "실제 거래·세금·매매 스프레드 미반영", "과거 생존 종목 중심 분석으로 생존편향 가능"]
+        assumptions = [f"사용자 선택 기간: {start_date:%Y-%m-%d} ~ {end_date:%Y-%m-%d}; 실제 공통 거래가격: {actual_start:%Y-%m-%d} ~ {actual_end:%Y-%m-%d}", "월말 및 마지막 거래가능일 가격 기준, 시작/종료 월은 부분 기간일 수 있음", "USD 표시 자산은 USD/KRW로 원화 환산", f"리밸런싱: {strategy}, 편도 거래비용: {transaction_bps:.0f} bps", f"예금: {deposit_rate:.2f}%, CMA: {cma_rate:.2f}%, 무위험수익률: {rf_rate:.2f}% (연 고정 가정)", "실제 거래·세금·매매 스프레드 미반영", "과거 생존 종목 중심 분석으로 생존편향 가능"]
         try:
             pdf = make_pdf(allocation, strategy, stats, comparison, monthly, port, benchmark, corr, sources, assumptions, analyst=analyst, macro_view=macro_view, observations=observations, benchmark_kospi200=kospi200_benchmark, benchmark_stats=dual_stats, monthly_result=monthly_result, initial_capital=initial_capital, capital_allocation=capital_allocation)
             st.download_button("📄 종합 투자 분석 PDF 다운로드", data=pdf, file_name="portfolio_lab_report.pdf", mime="application/pdf", type="primary")
